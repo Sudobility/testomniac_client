@@ -4,11 +4,16 @@ API client SDK for the Testomniac testing platform with TanStack Query hooks.
 
 ## Installation
 
+This package is published to **GitHub Packages** (not the public npm registry).
+The repo's `.npmrc` already points the `@sudobility` scope at
+`https://npm.pkg.github.com`; consumers need the same scope mapping plus a
+GitHub token with `read:packages` to install it.
+
 ```bash
 bun add @sudobility/testomniac_client
 ```
 
-Peer dependencies:
+Peer dependencies (provided by the consumer, not bundled):
 
 ```bash
 bun add react @tanstack/react-query @sudobility/types
@@ -16,53 +21,58 @@ bun add react @tanstack/react-query @sudobility/types
 
 ## Usage
 
+All public exports come from the package root — there is **no `/hooks`
+subpath** export.
+
 ```ts
-import { TestomniacClient } from '@sudobility/testomniac_client';
 import {
+  TestomniacClient,
+  createTestomniacClient,
   useRun,
-  useRunSummary,
-  useRunFindings,
   useSubmitScan,
-} from '@sudobility/testomniac_client/hooks';
+  usePublicScanSubmission,
+  queryKeys,
+} from '@sudobility/testomniac_client';
 
-// Create the HTTP client (dependency-injected NetworkClient)
-const client = new TestomniacClient({
-  baseUrl: 'https://api.example.com',
-  networkClient,
-});
+// Create the HTTP client. Constructor is POSITIONAL: (networkClient, baseUrl).
+// `networkClient` implements the NetworkClient interface from @sudobility/types
+// (dependency injection — the SDK never calls fetch itself).
+const client = new TestomniacClient(networkClient, baseUrl);
+// or: const client = createTestomniacClient(networkClient, baseUrl);
 
-// Fetch a test run directly
-const run = await client.getTestRun(runId, token);
+// Call a method directly. Methods take the auth token FIRST, then params.
+const run = await client.getTestRun(token, runId); // -> BaseResponse<TestRunResponse>
 
-// In a React component -- query hook:
-const { run, isLoading, error } = useRun({
-  networkClient,
-  baseUrl,
-  runId,
-  token,
-});
+// In a React component -- query hook. Args are POSITIONAL, not a config object.
+// Hooks return the raw TanStack Query result (data/isLoading/error/refetch).
+const { data, isLoading, error } = useRun(networkClient, baseUrl, token, runId);
+const testRun = data?.data; // unwrap BaseResponse
 
-// Mutation hook (public endpoint, no auth required):
-const { submitScan, isSubmitting } = useSubmitScan({
-  networkClient,
-  baseUrl,
-});
-await submitScan({ url: 'https://example.com', email: 'user@example.com' });
+// Mutation hook. useSubmitScan hits the public /api/v1/scan endpoint (no auth).
+const mutation = useSubmitScan(networkClient, baseUrl);
+await mutation.mutateAsync({ url: 'https://example.com' });
+
+// usePublicScanSubmission wraps useSubmitScan with friendly error handling:
+const { submitPublicScan, isSubmitting, error: scanError } =
+  usePublicScanSubmission(networkClient, baseUrl);
+const testRunId = await submitPublicScan({ url: 'https://example.com', email });
 ```
 
 ## API
 
 ### TestomniacClient
 
-HTTP client class constructed with `{ baseUrl, networkClient }`. Uses dependency injection via the `NetworkClient` interface from `@sudobility/types` -- no direct fetch calls. Provides 60+ async methods covering all API endpoints: users, entities, products, runners, test environments, test runs, findings, personas, test scenarios, test surfaces, test interactions, credentials, schedules, and more.
+HTTP client class constructed **positionally** as `new TestomniacClient(networkClient, baseUrl)` (or via the `createTestomniacClient(networkClient, baseUrl)` factory). Uses dependency injection via the `NetworkClient` interface from `@sudobility/types` -- no direct fetch calls. Provides ~100 async methods covering all API endpoints: users, entities, products, runners, test environments, test runs, findings, personas, test scenarios, test surfaces, test interactions, credentials, schedules, scan settings, navigation graph/planning, and more. Authenticated methods take the Firebase ID `token` as their **first** argument, e.g. `getTestRun(token, runId)`; public methods (e.g. `submitDiscoveryRun(data)`) take no token. Every method returns a `BaseResponse<T>` envelope.
 
-### Hooks (74)
+### Hooks (~100)
 
-All hooks follow consistent patterns:
+Hooks are thin wrappers over TanStack Query. They take **positional arguments** — typically `(networkClient, baseUrl, token, ...params, options?)` for queries and `(networkClient, baseUrl)` for mutations — not a config object.
 
-**Query hooks** accept a config object with `{ baseUrl, networkClient, token, ...params, enabled? }` and return `{ data, isLoading, error, refetch }` with safe defaults (`?? []`, `?? null`).
+**Query hooks** return the raw `UseQueryResult<BaseResponse<T>>` (`{ data, isLoading, error, refetch, ... }`). Unwrap the API payload with `data?.data`. Pass TanStack options (including `enabled`) via the trailing `options` argument.
 
-**Mutation hooks** return `{ mutateAsync, isPending, error, reset }` with automatic cache invalidation.
+**Mutation hooks** return the raw `UseMutationResult` (`{ mutateAsync, mutate, isPending, error, reset, ... }`).
+
+The hook names below are a catalog; consult the function signature in `src/hooks/<name>.ts` for the exact argument order.
 
 #### Runs & Summaries
 
@@ -165,33 +175,40 @@ All hooks follow consistent patterns:
 
 #### Scanning
 
-- `useSubmitScan(config)` -- Mutation: submit a scan (public endpoint, no auth required)
+- `useSubmitScan(networkClient, baseUrl)` -- Mutation: submit a scan to the public `/api/v1/scan` endpoint (no auth required)
+- `usePublicScanSubmission(networkClient, baseUrl)` -- Higher-level wrapper returning `{ submitPublicScan, isSubmitting, error, resetError }`
 
-### QUERY_KEYS
+### queryKeys
 
-Type-safe cache key factory for TanStack Query with 50+ key methods. Keys are namespaced under `'testomniac'` and structured hierarchically (e.g., `QUERY_KEYS.run(runId)` produces `['testomniac', 'run', runId]`).
+Type-safe cache key factory for TanStack Query (exported as `queryKeys`, not `QUERY_KEYS`). Keys are namespaced under `'testomniac'` and structured hierarchically, e.g. `queryKeys.testomniac.run(runId)` produces `['testomniac', 'run', runId]`. Use `queryKeys.testomniac.all()` for bulk invalidation. Also exported: `createQueryKey`, `getServiceKeys`, and the `QueryKey` type (all from `src/hooks/query-keys.ts`).
 
 ### Cache Settings
 
-- `DEFAULT_STALE_TIME` -- 5 minutes
-- `DEFAULT_GC_TIME` -- 30 minutes
+- `STALE_TIMES` (from `src/hooks/query-config.ts`) -- per-resource stale times used by the hooks: structural/reference data 10 min (`ENTITY`, `PRODUCT`, `RUNNER`, `PERSONA`, `SCENARIO`, ...), discovery artifacts 5 min (`SURFACE`, `INTERACTION`, `PAGE`, ...), run/finding data 2 min (`RUN`, `FINDING`), live dashboard 1 min (`DASHBOARD`).
+- `DEFAULT_GC_TIME` (from `src/types.ts`) -- 30 minutes.
+
+There is no `DEFAULT_STALE_TIME` constant.
 
 ### Utilities
 
 - `createAuthHeaders(token)` -- Builds `Authorization: Bearer` header object
+- `createHeaders(token?)` -- Builds request headers (optionally authorized)
 - `buildUrl(base, path)` -- URL construction helper
 - `handleApiError(error)` -- Standardized API error handling
+- `buildArtifactUrl(...)` / `buildRunStreamUrl(...)` -- Testomniac-specific URL builders (`src/utils/testomniac-helpers.ts`)
 
 ## Development
 
 ```bash
-bun run build          # Build ESM (tsc -> dist/)
+bun run build          # Build ESM (tsc -p tsconfig.build.json -> dist/)
 bun run build:watch    # Watch mode build
 bun run clean          # Remove dist/
-bun test               # Run Vitest tests
-bun run typecheck      # TypeScript check
-bun run lint           # ESLint
-bun run verify         # typecheck + test + build (use before commit)
+bun run test:unit      # Run Vitest tests once (NOT `bun test`, which uses Bun's own runner)
+bun run test:watch     # Vitest watch mode
+bun run typecheck      # TypeScript check (tsc --noEmit)
+bun run lint           # ESLint over src/
+bun run format         # Prettier write over src/
+bun run verify         # typecheck + lint + test:unit + build (use before commit)
 ```
 
 ## Related Packages
